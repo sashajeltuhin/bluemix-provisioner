@@ -36,7 +36,35 @@ func (p bmProvisioner) ListDCs() (map[string]string, error) {
 	return p.client.GetDatacenters()
 }
 
+func (p bmProvisioner) ListQuotes(id int) (map[string]string, error) {
+	return p.client.GetQuotes(id)
+}
+
+func (p bmProvisioner) ListPackages() (map[string]string, error) {
+	return p.client.GetPackages()
+}
+
+func (p bmProvisioner) ListVMs(opts QueryOpts) (map[string]string, error) {
+	return p.client.GetVMs(opts)
+}
+
+func (p bmProvisioner) DeleteVM(opts QueryOpts) error {
+	return p.client.DeleteVM(opts)
+}
+
+func (p bmProvisioner) ListPackage(packageID int) (map[string]string, error) {
+	return p.client.GetPackage(packageID)
+}
+
+func (p bmProvisioner) ListPackageTypes(id int) (map[string]string, error) {
+	return p.client.GetPackageTypes(id)
+}
+
 func (p bmProvisioner) ProvisionACP(opts ACPOpts) error {
-	fmt.Println("Provisioning...")
-	return nil
+	return p.client.BuildOrder(opts)
+}
+
+func (p bmProvisioner) CreateHost(opts ACPOpts) (int, error) {
+	fmt.Println("Provisioning Host...")
+	return p.client.BuildVM(opts)
 }

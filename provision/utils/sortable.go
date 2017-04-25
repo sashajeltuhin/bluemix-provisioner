@@ -1,7 +1,6 @@
 package utils
 
 import (
-	"fmt"
 	"sort"
 )
 
@@ -27,7 +26,6 @@ func (s SortedPairArr) Less(i, j int) bool {
 func SortMapbyVal(m map[string]string) SortedPairArr {
 	count := len(m)
 	i := 0
-	fmt.Println("Count: ", count)
 	var list SortedPairArr = make(SortedPairArr, count)
 	for key := range m {
 		list[i] = SortablePair{key, m[key]}
@@ -35,8 +33,6 @@ func SortMapbyVal(m map[string]string) SortedPairArr {
 	}
 
 	// Sort by val
-	fmt.Println("List: ", list)
 	sort.Sort(SortedPairArr(list))
-	fmt.Println("Sorted: ", list)
 	return list
 }

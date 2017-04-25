@@ -203,3 +203,14 @@ func CreatePublicKey(privateKey *rsa.PrivateKey, publicKeyPath string) error {
 	}
 	return ioutil.WriteFile(publicKeyPath, ssh.MarshalAuthorizedKey(pub), 0655)
 }
+
+func ContainsInt(arr []int, val int) bool {
+	contains := false
+	for i := 0; i < len(arr); i++ {
+		if arr[i] == val {
+			contains = true
+			break
+		}
+	}
+	return contains
+}
