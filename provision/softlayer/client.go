@@ -266,6 +266,7 @@ func (c *Client) BuildOrder(opts ACPOpts) error {
 		420,    //UNLIMITED_SSL_VPN_USERS_1_PPTP_VPN_USER_PER_ACCOUNT Unlimited SSL VPN Users & 1 PPTP VPN User per account
 		418}    //NESSUS_VULNERABILITY_ASSESSMENT_REPORTING Nessus Vulnerability Assessment & Reporting
 	packageID := 46
+	scriptUri := "https://raw.githubusercontent.com/sashajeltuhin/bluemix-provisioner/master/provision/softlayer/scripts/bootDC.ps1"
 
 	serv := bmservices.GetProductOrderService(c.apiSession)
 	var container bmtypes.Container_Product_Order
@@ -287,9 +288,13 @@ func (c *Client) BuildOrder(opts ACPOpts) error {
 		child.VirtualGuests = []bmtypes.Virtual_Guest{}
 		for i := 0; i < num; i++ {
 			var vm bmtypes.Virtual_Guest
+			var options bmtypes.Virtual_Guest_SupplementalCreateObjectOptions
+			options.PostInstallScriptUri = &scriptUri
 			sname := fmt.Sprintf(vmname, i+1)
 			vm.Hostname = &sname
 			vm.Domain = &opts.Domain
+			vm.PostInstallScriptUri = &scriptUri
+			vm.SupplementalCreateObjectOptions = &options
 			child.VirtualGuests = append(child.VirtualGuests, vm)
 		}
 		container.OrderContainers = append(container.OrderContainers, child)
@@ -505,12 +510,23 @@ func (c *Client) GetVMs(opts QueryOpts) (map[string]string, error) {
 	return objMap, nil
 }
 
+func (c *Client) RebootVM(id int) error {
+	vmserv := bmservices.GetVirtualGuestService(c.apiSession)
+	ok, err := vmserv.Id(int).RebootSoft()
+
+	if ok {
+		fmt.Println("VM is scheduled for roboot")
+	} else {
+		return fmt.Errorf("Unable to delete VM %d. %v\n", opts.ID, err)
+	}
+}
+
 func (c *Client) DeleteVM(opts QueryOpts) error {
 	vmserv := bmservices.GetVirtualGuestService(c.apiSession)
-
 	ok, err := vmserv.Id(opts.ID).DeleteObject()
 
 	if ok {
+		fmt.Println("VM is scheduled for removal")
 		return nil
 	} else {
 		return fmt.Errorf("Unable to delete VM %d. %v\n", opts.ID, err)
