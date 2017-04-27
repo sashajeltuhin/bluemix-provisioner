@@ -8,6 +8,7 @@ import (
 	//"io/ioutil"
 	"strconv"
 	s "strings"
+	"time"
 
 	"github.com/Jeffail/gabs"
 
@@ -38,7 +39,7 @@ func (c *Client) getAPISession(username string, apikey string) (*bmsession.Sessi
 	return c.apiSession, nil
 }
 
-func (c *Client) GetDatacenters() (map[string]string, error) {
+func (c *Client) GetDatacenters(mode string) (map[string]string, error) {
 	var dcs []bmtypes.Location
 	var err error
 	loc := bmservices.GetLocationService(c.apiSession)
@@ -49,9 +50,12 @@ func (c *Client) GetDatacenters() (map[string]string, error) {
 	var objMap map[string]string = make(map[string]string)
 	for i := 0; i < len(dcs); i++ {
 		var dc bmtypes.Location = dcs[i]
-		id := strconv.Itoa(*dc.Id)
-		fmt.Println("DC ID:", id, *dc.LongName)
-		objMap[id] = *dc.LongName
+		if mode == "id" {
+			id := strconv.Itoa(*dc.Id)
+			objMap[id] = *dc.LongName
+		} else {
+			objMap[*dc.Name] = *dc.LongName
+		}
 	}
 	return objMap, nil
 }
@@ -247,53 +251,37 @@ func (c *Client) parseObj(body []byte, objNode string, idfield string, namefield
 }
 
 func (c *Client) BuildOrder(opts ACPOpts) error {
-	numCats := 1
+	numCats := len(opts.Nodes)
 	//category fields
 	hourly := opts.HourlyBill
-	num := 1
-	vmname := "ACP-WIN-%d"
-	items := []int{1641, //GUEST_CORES_2 2 x 2.0 GHz Cores
-		1645,   //RAM_2_GB 2 GB
-		1639,   //GUEST_DISK_100_GB_SAN 100 GB (SAN)
-		905,    //REBOOT_REMOTE_CONSOLE Reboot / Remote Console
-		274,    // 1_GBPS_PUBLIC_PRIVATE_NETWORK_UPLINKS 1 Gbps Public & Private Network Uplinks
-		1800,   //BANDWIDTH_0_GB_2 0 GB Bandwidth
-		21,     //1_IP_ADDRESS 1 IP Address
-		175777, //OS_WINDOWS_2012_R2_FULL_STD_64_BIT Windows Server 2012 R2 Standard Edition (64 bit)
-		55,     //MONITORING_HOST_PING Host Ping
-		57,     //NOTIFICATION_EMAIL_AND_TICKET Email and Ticket
-		58,     //AUTOMATED_NOTIFICATION Automated Notification
-		420,    //UNLIMITED_SSL_VPN_USERS_1_PPTP_VPN_USER_PER_ACCOUNT Unlimited SSL VPN Users & 1 PPTP VPN User per account
-		418}    //NESSUS_VULNERABILITY_ASSESSMENT_REPORTING Nessus Vulnerability Assessment & Reporting
-	packageID := 46
-	scriptUri := "https://raw.githubusercontent.com/sashajeltuhin/bluemix-provisioner/master/provision/softlayer/scripts/bootDC.ps1"
 
 	serv := bmservices.GetProductOrderService(c.apiSession)
 	var container bmtypes.Container_Product_Order
 	container.OrderContainers = []bmtypes.Container_Product_Order{}
 	//services
 	for c := 0; c < numCats; c++ {
+		node := opts.Nodes[c]
 		var child bmtypes.Container_Product_Order
 		child.Location = &opts.DC
 		fmt.Println("Location:", *child.Location)
-		child.PackageId = &packageID
+		child.PackageId = &node.Package
 		child.UseHourlyPricing = &hourly
-		child.Quantity = &num
+		child.Quantity = &node.Count
 		//service prices
 		child.Prices = []bmtypes.Product_Item_Price{}
-		for p := 0; p < len(items); p++ {
-			child.Prices = append(child.Prices, bmtypes.Product_Item_Price{Id: &items[p]})
+		for p := 0; p < len(node.Prices); p++ {
+			child.Prices = append(child.Prices, bmtypes.Product_Item_Price{Id: &node.Prices[p]})
 		}
 		//VMs for the service
 		child.VirtualGuests = []bmtypes.Virtual_Guest{}
-		for i := 0; i < num; i++ {
+		for i := 0; i < node.Count; i++ {
 			var vm bmtypes.Virtual_Guest
 			var options bmtypes.Virtual_Guest_SupplementalCreateObjectOptions
-			options.PostInstallScriptUri = &scriptUri
-			sname := fmt.Sprintf(vmname, i+1)
+			options.PostInstallScriptUri = &node.ScriptUri
+			sname := fmt.Sprintf("%s-%d", node.VMname, i+1)
 			vm.Hostname = &sname
 			vm.Domain = &opts.Domain
-			vm.PostInstallScriptUri = &scriptUri
+			vm.PostInstallScriptUri = &node.ScriptUri
 			vm.SupplementalCreateObjectOptions = &options
 			child.VirtualGuests = append(child.VirtualGuests, vm)
 		}
@@ -339,26 +327,59 @@ func (c *Client) BuildOrder(opts ACPOpts) error {
 	}
 
 	return nil
-
-	//isPingable
-
-	//get virtual guest status
-	//getObject - network component - ipAddressBindings - Network_Component_IpAddress - Network_Subnet_IpAddress
-	//Account::getAllBillingItems
-
-	//Cancel: Billing Item cancel service
-
 }
 
-func (c *Client) BuildVM(opts ACPOpts) (int, error) {
+func (c *Client) BuildVM(opts ACPOpts) ([]int, error) {
+	ids := []int{}
+	var hostMap map[int]ACPNode = make(map[int]ACPNode)
 	vmService := bmservices.GetVirtualGuestService(c.apiSession)
-	var obj bmtypes.Virtual_Guest
+	for i := 0; i < len(opts.Nodes); i++ {
+		node := opts.Nodes[i]
+		var obj bmtypes.Virtual_Guest
+		var dc bmtypes.Location
+		dc.Name = &opts.DC
+		localDisk := true
+		host := fmt.Sprintf("%s-%d", node.VMname, i+1)
+		os := node.OS
+		cpus := node.CPU
+		mem := node.Mem
+		scriptUri := node.ScriptUri
+		var options bmtypes.Virtual_Guest_SupplementalCreateObjectOptions
+		options.PostInstallScriptUri = &scriptUri
+		obj.PostInstallScriptUri = &scriptUri
+		obj.SupplementalCreateObjectOptions = &options
+		obj.HourlyBillingFlag = &opts.HourlyBill
+		obj.LocalDiskFlag = &localDisk
+		obj.StartCpus = &cpus
+		obj.MaxMemory = &mem
+		obj.OperatingSystemReferenceCode = &os
+		obj.Datacenter = &dc
+		obj.Domain = &opts.Domain
+		obj.Hostname = &host
 
-	newVM, err := vmService.CreateObject(&obj)
-	if err != nil {
-		fmt.Errorf("Cannot create VM %v \n", err)
+		newVM, err := vmService.CreateObject(&obj)
+		if err != nil {
+			fmt.Errorf("Cannot create VM %v \n", err)
+		}
+		ids = append(ids, *newVM.Id)
+		hostMap[*newVM.Id] = node
+		fmt.Printf("Bootstrap node %s started provisioning. Waiting for it to become available\n", *obj.Hostname)
 	}
-	return *newVM.Id, nil
+
+	for h := 0; h < len(ids); h++ {
+		fmt.Printf("Starting wait loop for server %d\n", h+1)
+		ok, errCheck := c.CheckIfHostUp(ids[h])
+		if errCheck != nil {
+			return ids, errCheck
+		} else if ok {
+			n := hostMap[ids[h]]
+			n.Created = true
+			hostMap[ids[h]] = n
+		}
+	}
+
+	return ids, nil
+
 }
 
 func (c *Client) GetQuotes(id int) (map[string]string, error) {
@@ -510,14 +531,47 @@ func (c *Client) GetVMs(opts QueryOpts) (map[string]string, error) {
 	return objMap, nil
 }
 
-func (c *Client) RebootVM(id int) error {
+func (c *Client) RebootVM(id int, hostName string) error {
 	vmserv := bmservices.GetVirtualGuestService(c.apiSession)
-	ok, err := vmserv.Id(int).RebootSoft()
+	ok, err := vmserv.Id(id).RebootSoft()
 
 	if ok {
 		fmt.Println("VM is scheduled for roboot")
 	} else {
-		return fmt.Errorf("Unable to delete VM %d. %v\n", opts.ID, err)
+		return fmt.Errorf("Unable to delete VM %d. %v\n", id, err)
+	}
+	c.BlockUntilAVailable(id, hostName)
+	return nil
+}
+
+func (c *Client) BlockUntilAVailable(hostID int, hostName string) {
+	vmserv := bmservices.GetVirtualGuestService(c.apiSession)
+	for {
+
+		if ok, err := vmserv.Id(hostID).IsPingable(); err == nil && ok == true {
+			// command succeeded
+			fmt.Printf("Node %s is now available\n", hostName)
+			return
+		}
+		fmt.Printf(".")
+		time.Sleep(3 * time.Second)
+	}
+}
+
+func (c *Client) CheckIfHostUp(hostID int) (bool, error) {
+	vmserv := bmservices.GetVirtualGuestService(c.apiSession)
+	for {
+		vm, err := vmserv.Id(hostID).Mask("hostname;provisionDate").GetObject()
+		if err != nil {
+			return false, fmt.Errorf("Cannot check availability of the host %v", err)
+		}
+		if vm.ProvisionDate != nil {
+			// command succeeded
+			fmt.Printf("Node %s is now available\n", *vm.Hostname)
+			return true, nil
+		}
+		fmt.Printf(".")
+		time.Sleep(5 * time.Second)
 	}
 }
 

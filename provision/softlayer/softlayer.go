@@ -2,8 +2,11 @@ package softlayer
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 
 	"strings"
@@ -21,18 +24,27 @@ type ACPOpts struct {
 	CredOpts
 	DC         string
 	Domain     string
+	Part       string
 	HourlyBill bool
 	NumLM      int
 	NUMWin     int
 	QuoteOnly  bool
 	VerifyOnly bool
+	Nodes      []ACPNode
 }
 
-type ACPGroup struct {
-	Name   string
-	VMname string
-	Count  int
-	Prices []int
+type ACPNode struct {
+	Name      string
+	VMname    string
+	Package   int
+	Count     int
+	Prices    []int
+	Mem       int
+	CPU       int
+	OS        string
+	ScriptUri string
+	Created   bool
+	Ready     bool
 }
 
 type QueryOpts struct {
@@ -49,11 +61,11 @@ func Cmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(ACPCreateCmd())
-	cmd.AddCommand(DCCreateCmd())
 	cmd.AddCommand(ShowQuotesCmd())
 	cmd.AddCommand(ShowPackagesCmd())
 	cmd.AddCommand(ShowVMsCmd())
 	cmd.AddCommand(DeleteVMsCmd())
+	cmd.AddCommand(RunPy())
 
 	return cmd
 }
@@ -73,30 +85,12 @@ func ACPCreateCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&opts.APIPass, "apikey", "p", "", "API key")
 	cmd.Flags().StringVarP(&opts.DC, "dc", "", "", "Datacenter identifier")
 	cmd.Flags().StringVarP(&opts.Domain, "domain", "", "", "Domain for the ACP instance")
+	cmd.Flags().StringVarP(&opts.Part, "part", "", "", "Part of the platform to orchestrate. Valid options: <all> <boot> <dc>. If omitted, entire platform is orchestrated")
 	cmd.Flags().BoolVarP(&opts.HourlyBill, "hourly", "", true, "Hourly billing. If set to false, monthly billing will apply to the order")
 	cmd.Flags().BoolVarP(&opts.QuoteOnly, "quote", "", false, "Produce a quote only")
 	cmd.Flags().BoolVarP(&opts.VerifyOnly, "verify", "", false, "Check that the order is put together correclty. Do not place yet")
 	cmd.Flags().IntVarP(&opts.NumLM, "count-lm", "", 2, "Number of load managers. Default 2")
 	cmd.Flags().IntVarP(&opts.NUMWin, "count-win", "", 4, "Number of web/app servers. Default 4")
-
-	return cmd
-}
-
-func DCCreateCmd() *cobra.Command {
-	opts := ACPOpts{}
-	cmd := &cobra.Command{
-		Use:   "createDC",
-		Short: "Creates a single domain controller",
-		Long:  `Creates a single domain controller for a new ACP instance.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return createDC(opts)
-		},
-	}
-
-	cmd.Flags().StringVarP(&opts.APIUser, "user", "u", "", "API user name")
-	cmd.Flags().StringVarP(&opts.APIPass, "apikey", "", "", "API key")
-	cmd.Flags().StringVarP(&opts.DC, "dc", "", "", "Datacenter identifier")
-	cmd.Flags().StringVarP(&opts.Domain, "domain", "", "", "ACP Windows Domain name")
 
 	return cmd
 }
@@ -170,6 +164,23 @@ func ShowPackagesCmd() *cobra.Command {
 	return cmd
 }
 
+func RunPy() *cobra.Command {
+	file := ""
+	cmdname := ""
+	cmd := &cobra.Command{
+		Use:   "runpy",
+		Short: "Runs a python script",
+		Long:  `Runs a python script.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runPycmd(file, cmdname)
+		},
+	}
+
+	cmd.Flags().StringVarP(&file, "file", "", "", "File name")
+	cmd.Flags().StringVarP(&cmdname, "cmd", "", "", "Command to execute")
+	return cmd
+}
+
 func getCreds(opts *CredOpts) (*bufio.Reader, *bmProvisioner, error) {
 	reader := bufio.NewReader(os.Stdin)
 	opts.APIUser = os.Getenv("IBM_API_USER")
@@ -195,7 +206,11 @@ func getCreds(opts *CredOpts) (*bufio.Reader, *bmProvisioner, error) {
 
 func askForDC(opts *ACPOpts, reader *bufio.Reader, provisioner *bmProvisioner) error {
 	if opts.DC == "" {
-		dcs, errDC := provisioner.ListDCs()
+		dcmode := "name"
+		if isEntireACP(opts) {
+			dcmode = "id"
+		}
+		dcs, errDC := provisioner.ListDCs(dcmode)
 		if errDC != nil {
 			return fmt.Errorf("Cannot load data centers. %v", errDC)
 		}
@@ -261,34 +276,52 @@ func showPackages(opts QueryOpts) error {
 	return nil
 }
 
-func createDC(opts ACPOpts) error {
-	reader, provisioner, _ := getCreds(&opts.CredOpts)
-	err := askForDC(&opts, reader, provisioner)
-	if err != nil {
-		return err
-	}
-	id, e := provisioner.CreateHost(opts)
-	if e != nil {
-		return e
-	}
-	fmt.Println("VM orchestration started. ID = ", id)
-	return nil
-}
-
 func makeInfra(opts ACPOpts) error {
 	reader, provisioner, _ := getCreds(&opts.CredOpts)
+	addParts(&opts, provisioner)
 	err := askForDC(&opts, reader, provisioner)
 	if err != nil {
 		return err
 	}
 	askDomain(&opts, reader)
-	errProv := provisioner.ProvisionACP(opts)
+	var errProv error
+	if isEntireACP(&opts) {
+		errProv = provisioner.ProvisionACP(opts)
+	} else {
+		_, errProv = provisioner.CreateHost(opts)
+	}
 
 	if errProv != nil {
 		return errProv
 	}
 	fmt.Println("Done")
 	return nil
+}
+
+func isEntireACP(opts *ACPOpts) bool {
+	return opts.Part == "" || strings.ToLower(opts.Part) == "all"
+}
+
+func addParts(opts *ACPOpts, provisioner *bmProvisioner) {
+	opts.Nodes = []ACPNode{}
+	if isEntireACP(opts) {
+		addBootNode(opts, provisioner, "multi")
+		addDCNode(opts, provisioner, "multi")
+	} else if opts.Part == "boot" {
+		addBootNode(opts, provisioner, "single")
+	} else if opts.Part == "dc" {
+		addDCNode(opts, provisioner, "single")
+	}
+}
+
+func addBootNode(opts *ACPOpts, provisioner *bmProvisioner, orderMode string) {
+	bootNode := provisioner.GetBootSpec(orderMode)
+	opts.Nodes = append(opts.Nodes, bootNode)
+}
+
+func addDCNode(opts *ACPOpts, provisioner *bmProvisioner, orderMode string) {
+	dcNode := provisioner.GetDCSpec(orderMode)
+	opts.Nodes = append(opts.Nodes, dcNode)
 }
 
 func askForInput(objList map[string]string, reader *bufio.Reader) string {
@@ -312,4 +345,32 @@ func askForInput(objList map[string]string, reader *bufio.Reader) string {
 		objID = strings.Trim(objID, "\"")
 		return objID
 	}
+}
+
+func runPycmd(file string, cmdstr string) error {
+	dir, errDir := filepath.Abs(filepath.Dir(os.Args[0]))
+	if errDir != nil {
+		fmt.Println("Cannot get path to exec", errDir)
+	}
+	path := filepath.Join(dir, "softlayer/scripts/")
+	fmt.Println("Trying to locate script in folder", path)
+
+	filePath := filepath.Join(path, file)
+	fmt.Println("Checking file path ", filePath)
+	_, staterr := os.Stat(filePath)
+	if os.IsNotExist(staterr) {
+		return fmt.Errorf("File was not found in expected location. Also you may need to change file permissions to allow w/r for the user (chmod 600) %v", staterr)
+	}
+	cmd := exec.Command(filePath, cmdstr)
+	var out bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		return fmt.Errorf("Script error: %v \n", fmt.Sprint(err)+": "+stderr.String())
+	}
+	fmt.Println("Result: " + out.String())
+
+	return nil
 }
